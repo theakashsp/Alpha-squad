@@ -40,7 +40,7 @@ const nextConfig: NextConfig = {
               // Tile images must be whitelisted — CartoDB + OSM
               `img-src 'self' data: blob: ${tileDomains}`,
               // Tile HTTP requests + WS + REST
-              `connect-src 'self' ${tileDomains} ${isDev ? "http://localhost:8000 http://localhost:3000 " : ""}ws://localhost:8000 wss://localhost:8000`,
+              `connect-src 'self' ${tileDomains} https://nominatim.openstreetmap.org ${isDev ? "http://localhost:8000 http://localhost:3000 " : ""}ws://localhost:8000 wss://localhost:8000`,
               "font-src 'self' https://fonts.gstatic.com",
               "worker-src 'self' blob:",
             ].join("; "),

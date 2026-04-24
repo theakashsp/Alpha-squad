@@ -23,6 +23,10 @@ import dynamic from "next/dynamic";
 import { useCallback, useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
+import DispatchPanel from "@/components/DispatchPanel";
+import LoginScreen from "@/components/LoginScreen";
+import UnitProfilePanel from "@/components/UnitProfilePanel";
+import { useAuth } from "@/hooks/useAuth";
 import { useRescueStream } from "@/hooks/useRescueStream";
 import { useRescueStore } from "@/lib/store";
 
@@ -96,11 +100,11 @@ function SeedButton() {
   const seed = useCallback(async () => {
     setStatus("loading");
     try {
-      const seedRes = await fetch("http://localhost:8000/api/signals/seed", { method: "POST" });
+      const seedRes = await fetch("/api/signals/seed", { method: "POST" });
       if (!seedRes.ok) throw new Error(await seedRes.text());
 
-      // Fetch and hydrate the signal list into the store
-      const listRes = await fetch("http://localhost:8000/api/signals");
+      // Fetch full signal list and hydrate the Zustand store
+      const listRes = await fetch("/api/signals");
       if (listRes.ok) {
         const signals = await listRes.json();
         upsertSignals(signals);
@@ -144,10 +148,8 @@ function DemoButton() {
   const startDemo = useCallback(async () => {
     setStatus("starting");
     try {
-      // Seed junctions first (idempotent)
-      await fetch("http://localhost:8000/api/signals/seed", { method: "POST" });
-      // Kick off the in-process simulation
-      const res = await fetch("http://localhost:8000/api/demo/start", { method: "POST" });
+      await fetch("/api/signals/seed", { method: "POST" });
+      const res = await fetch("/api/demo/start", { method: "POST" });
       if (!res.ok) throw new Error(await res.text());
       setStatus("running");
     } catch {
@@ -157,7 +159,7 @@ function DemoButton() {
   }, []);
 
   const stopDemo = useCallback(async () => {
-    await fetch("http://localhost:8000/api/demo/stop", { method: "POST" }).catch(() => {});
+    await fetch("/api/demo/stop", { method: "POST" }).catch(() => {});
     setStatus("idle");
   }, []);
 
@@ -193,7 +195,19 @@ function DemoButton() {
 // ---------------------------------------------------------------------------
 // Header
 // ---------------------------------------------------------------------------
-function Header() {
+function Header({
+  onDispatch,
+  onProfile,
+  onLogout,
+  onSwitchAccount,
+  operatorName,
+}: {
+  onDispatch: () => void;
+  onProfile: () => void;
+  onLogout: () => void;
+  onSwitchAccount: () => void;
+  operatorName: string;
+}) {
   const { isConnected, connectionLabel } = useRescueStream();
   const signalCount = useRescueStore((s) => s.signals.size);
   const ambulanceCount = useRescueStore((s) => s.ambulances.size);
@@ -224,9 +238,31 @@ function Header() {
       </div>
 
       {/* Right actions */}
-        <div className="flex items-center gap-2">
-          <DemoButton />
-          <SeedButton />
+      <div className="flex items-center gap-2">
+        {/* Profile / settings button */}
+        <button
+          onClick={onProfile}
+          title="Unit Profile & Settings"
+          className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-mono
+                     border border-slate-600 text-slate-400
+                     hover:border-cyan-500/60 hover:text-cyan-400 hover:bg-cyan-500/10
+                     transition-colors"
+        >
+          🪪 Profile
+        </button>
+        {/* Dispatch button — primary CTA */}
+        <button
+          onClick={onDispatch}
+          className="flex items-center gap-1.5 px-3 py-1 rounded-md text-[11px] font-mono font-bold
+                     border border-red-500/60 text-red-400 bg-red-500/10
+                     hover:bg-red-500/20 hover:border-red-400 hover:text-red-300
+                     transition-colors"
+        >
+          <Siren className="w-3 h-3" />
+          Dispatch
+        </button>
+        <DemoButton />
+        <SeedButton />
         <Badge
           variant={isConnected ? "success" : "destructive"}
           className="text-[10px] font-mono gap-1"
@@ -241,6 +277,28 @@ function Header() {
         {!isConnected && (
           <AlertTriangle className="w-3.5 h-3.5 text-emergency-amber animate-pulse" />
         )}
+        {/* Operator chip + session buttons */}
+        {operatorName && (
+          <div className="flex items-center gap-1.5 pl-1 border-l border-border">
+            <span className="text-[10px] text-muted-foreground font-mono hidden md:block truncate max-w-[100px]">
+              👤 {operatorName}
+            </span>
+            <button
+              onClick={onSwitchAccount}
+              title="Switch to a different unit"
+              className="text-[10px] font-mono px-2 py-1 rounded border border-slate-700 text-slate-500 hover:border-cyan-500/50 hover:text-cyan-400 transition-colors"
+            >
+              Switch
+            </button>
+            <button
+              onClick={onLogout}
+              title="End shift / log out"
+              className="text-[10px] font-mono px-2 py-1 rounded border border-slate-700 text-slate-500 hover:border-red-500/50 hover:text-red-400 transition-colors"
+            >
+              End Shift
+            </button>
+          </div>
+        )}
       </div>
     </header>
   );
@@ -250,12 +308,37 @@ function Header() {
 // Page
 // ---------------------------------------------------------------------------
 export default function HomePage() {
-  // Boot the WebSocket connection at the top level
+  const { session, hydrated, login, logout, switchUnit, activeUnitId } = useAuth();
+
+  // Boot the WebSocket connection at the top level (always, so it's ready on login)
   useRescueStream();
+
+  const [showDispatch, setShowDispatch] = useState(false);
+  const [showProfile, setShowProfile]   = useState(false);
+
+  // While sessionStorage is being read, render nothing to avoid flash
+  if (!hydrated) return null;
+
+  // Not logged in → show login screen, passing auth callbacks from this hook instance
+  if (!session) {
+    return (
+      <LoginScreen
+        activeUnitId={activeUnitId}
+        onLogin={login}
+        onSwitchUnit={switchUnit}
+      />
+    );
+  }
 
   return (
     <div className="h-screen w-screen flex flex-col overflow-hidden bg-background scanlines">
-      <Header />
+      <Header
+        onDispatch={() => setShowDispatch(true)}
+        onProfile={() => setShowProfile(true)}
+        onLogout={logout}
+        onSwitchAccount={logout}
+        operatorName={session.name}
+      />
 
       {/* Main area */}
       <main className="flex-1 flex overflow-hidden relative">
@@ -268,6 +351,16 @@ export default function HomePage() {
         {/* Dashboard sidebar */}
         <Dashboard />
       </main>
+
+      {/* Dispatch modal */}
+      {showDispatch && (
+        <DispatchPanel onClose={() => setShowDispatch(false)} />
+      )}
+
+      {/* Profile / settings modal */}
+      {showProfile && (
+        <UnitProfilePanel onClose={() => setShowProfile(false)} />
+      )}
     </div>
   );
 }

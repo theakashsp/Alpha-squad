@@ -39,6 +39,7 @@ export interface RescueRouteState {
   upsertSignal: (signal: TrafficSignal) => void;
   upsertSignals: (signals: TrafficSignal[]) => void;
   upsertAmbulance: (pos: AmbulancePosition) => void;
+  removeAmbulance: (vehicleId: string) => void;
 
   applyGreenWaveTrigger: (trigger: GreenWaveTrigger) => void;
   clearTriggeredSignals: () => void;
@@ -97,14 +98,27 @@ export const useRescueStore = create<RescueRouteState>()(
         return { ambulances: next };
       }),
 
+    removeAmbulance: (vehicleId) =>
+      set((s) => {
+        const next = new Map(s.ambulances);
+        next.delete(vehicleId);
+        return { ambulances: next };
+      }),
+
     applyGreenWaveTrigger: (trigger) => {
-      // Update signals map with the GREEN-overridden states
+      // Update signals map with latest state from the trigger payload
       const updatedSignals = new Map(get().signals);
       for (const sig of trigger.signals) {
         updatedSignals.set(sig.id, sig);
       }
-      // Track which signal IDs are actively pulsing
-      const pulsing = new Set(trigger.signals.map((s) => s.id));
+
+      // Only pulse signals that are genuinely in emergency-override GREEN state.
+      // Nearby-but-not-yet-overridden signals must NOT be marked as pulsing.
+      const pulsing = new Set(
+        trigger.signals
+          .filter((s) => s.emergency_override)
+          .map((s) => s.id)
+      );
 
       set({
         latestTrigger: trigger,
@@ -112,8 +126,9 @@ export const useRescueStore = create<RescueRouteState>()(
         signals: updatedSignals,
       });
 
-      // Auto-clear the pulse animation after 4 seconds
-      setTimeout(() => get().clearTriggeredSignals(), 4_000);
+      // Auto-clear the pulse ring after 6 s — but persistent GREEN is held
+      // by sig.emergency_override in the store, not by triggeredSignalIds.
+      setTimeout(() => get().clearTriggeredSignals(), 6_000);
     },
 
     clearTriggeredSignals: () => set({ triggeredSignalIds: new Set() }),

@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import settings
 from backend.database import AsyncSessionLocal
-from backend.models import Ambulance, SignalStatus, TrafficLight
+from backend.models import ActiveRescue, Ambulance, RescueStatus, SignalStatus, TrafficLight
 from backend.schemas import (
     AmbulancePositionSchema,
     GreenWaveTrigger,
@@ -112,8 +112,35 @@ class GreenWaveService:
 
     def __init__(self) -> None:
         self.mappls = RoutingClient()
-        # vehicle_id -> set of signal UUIDs in green override
+        # vehicle_id -> set of signal UUIDs currently in emergency GREEN override.
+        # Populated at startup from DB so a backend restart never orphans green signals.
         self._active_overrides: dict[str, set[UUID]] = {}
+
+    async def sync_overrides_from_db(self) -> None:
+        """
+        On startup: read every signal that is still emergency_override=True in the DB
+        and reset them all to RED.  This clears any signals that were left GREEN by a
+        previous process that crashed or was restarted before the ambulance passed.
+        """
+        async with AsyncSessionLocal() as session:
+            stmt = select(TrafficLight).where(TrafficLight.emergency_override == True)  # noqa: E712
+            result = await session.execute(stmt)
+            stuck = result.scalars().all()
+            if stuck:
+                ids = [s.id for s in stuck]
+                await session.execute(
+                    update(TrafficLight)
+                    .where(TrafficLight.id.in_(ids))
+                    .values(
+                        current_status=SignalStatus.RED,
+                        emergency_override=False,
+                        updated_at=datetime.utcnow(),
+                    )
+                )
+                await session.commit()
+                logger.warning(
+                    f"[startup] Cleared {len(stuck)} orphaned emergency-GREEN signals from previous run."
+                )
 
     # ------------------------------------------------------------------
     # Main entry point called by the ConnectionManager
@@ -294,6 +321,14 @@ class GreenWaveService:
             )
         )
         await session.execute(stmt)
+        # Increment signals_cleared counter on this vehicle's active rescue
+        stmt2 = (
+            update(ActiveRescue)
+            .where(ActiveRescue.vehicle_id == vehicle_id)
+            .where(ActiveRescue.status == RescueStatus.ACTIVE)
+            .values(signals_cleared=ActiveRescue.signals_cleared + len(signal_ids))
+        )
+        await session.execute(stmt2)
         logger.info(
             f"Emergency GREEN set  vehicle={vehicle_id}  signals={signal_ids}"
         )

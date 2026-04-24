@@ -130,6 +130,13 @@ const MISSION_META = {
   DEMO:        { label: "Demo",        color: "#00BFA5", dot: "bg-teal-400"   },
 } as const;
 
+const INCIDENT_META: Record<string, { icon: string; label: string; color: string }> = {
+  CARDIAC_ARREST: { icon: "🫀", label: "Cardiac Arrest", color: "#FF4444" },
+  ROAD_ACCIDENT:  { icon: "🚗", label: "Road Accident",  color: "#FF8C00" },
+  STROKE:         { icon: "🧠", label: "Stroke",         color: "#9C27B0" },
+  TRAUMA:         { icon: "🩹", label: "Trauma",         color: "#F44336" },
+};
+
 function DispatchRow({ amb }: { amb: import("@/lib/types").AmbulancePosition }) {
   const isDemo   = amb.vehicle_id === "BLR-AMB-DEMO";
   const meta     = isDemo
@@ -138,6 +145,7 @@ function DispatchRow({ amb }: { amb: import("@/lib/types").AmbulancePosition }) 
     ? MISSION_META.TO_PATIENT
     : MISSION_META.TO_HOSPITAL;
 
+  const incident = amb.incident_type ? INCIDENT_META[amb.incident_type] : null;
   const etaMin   = amb.eta_seconds != null ? Math.floor(amb.eta_seconds / 60) : null;
   const etaSec   = amb.eta_seconds != null ? amb.eta_seconds % 60 : null;
 
@@ -148,7 +156,7 @@ function DispatchRow({ amb }: { amb: import("@/lib/types").AmbulancePosition }) 
       exit={{ opacity: 0, x: 12 }}
       className="flex items-start gap-2 py-2 border-b border-border/40 last:border-0"
     >
-      {/* Coloured dot + siren */}
+      {/* Coloured dot */}
       <span className={`mt-1 w-2 h-2 rounded-full shrink-0 ${meta.dot} animate-pulse`} />
 
       <div className="min-w-0 flex-1">
@@ -162,6 +170,14 @@ function DispatchRow({ amb }: { amb: import("@/lib/types").AmbulancePosition }) 
           >
             {meta.label}
           </span>
+          {incident && (
+            <span
+              className="text-[9px] font-mono px-1 rounded"
+              style={{ background: incident.color + "22", color: incident.color }}
+            >
+              {incident.icon} {incident.label}
+            </span>
+          )}
         </div>
         <p className="text-[10px] text-muted-foreground truncate">
           {amb.origin ?? "—"} → {amb.destination ?? "—"}
@@ -192,6 +208,7 @@ interface LogEntry {
   ts: Date;
   label: string;
   count: number;
+  incidentIcon?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -336,13 +353,17 @@ export default function Dashboard() {
   const [eventLog, setEventLog] = useState<LogEntry[]>([]);
   useEffect(() => {
     if (!latestTrigger) return;
+    const incident = latestTrigger.ambulance.incident_type
+      ? INCIDENT_META[latestTrigger.ambulance.incident_type]
+      : null;
     const entry: LogEntry = {
       id: `${Date.now()}`,
       ts: new Date(),
-      label: `Green wave — ${latestTrigger.ambulance.vehicle_id}`,
+      label: `Green wave — ${latestTrigger.ambulance.vehicle_id}${incident ? ` (${incident.label})` : ""}`,
       count: latestTrigger.signals.length,
+      incidentIcon: incident?.icon,
     };
-    setEventLog((prev) => [entry, ...prev].slice(0, 6));
+    setEventLog((prev) => [entry, ...prev].slice(0, 8));
   }, [latestTrigger]);
 
   return (
@@ -537,11 +558,11 @@ export default function Dashboard() {
                   exit={{ opacity: 0 }}
                   className="flex items-center gap-2 py-1"
                 >
-                  <CheckCircle2 className="w-3 h-3 text-emergency-green shrink-0" />
+                  <span className="text-sm shrink-0">{entry.incidentIcon ?? "⚡"}</span>
                   <div className="min-w-0 flex-1">
-                    <p className="text-[11px] font-mono text-foreground truncate">{entry.label}</p>
+                    <p className="text-[11px] font-mono text-emergency-green truncate">{entry.label}</p>
                     <p className="text-[9px] text-muted-foreground">
-                      {entry.count} signals cleared •{" "}
+                      {entry.count} signal{entry.count !== 1 ? "s" : ""} cleared •{" "}
                       {entry.ts.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
                     </p>
                   </div>

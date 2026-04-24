@@ -12,6 +12,7 @@
  *   • Draw the route polyline on GREEN_WAVE_TRIGGER
  */
 
+import { AnimatePresence, motion } from "framer-motion";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -32,7 +33,15 @@ import {
   selectSignalList,
   useRescueStore,
 } from "@/lib/store";
-import type { AmbulancePosition, MissionType, TrafficSignal } from "@/lib/types";
+import type { AmbulancePosition, Hospital, MissionType, TrafficSignal } from "@/lib/types";
+
+// Incident type display metadata
+const INCIDENT_META: Record<string, { icon: string; label: string; color: string }> = {
+  CARDIAC_ARREST: { icon: "🫀", label: "Cardiac Arrest", color: "#FF4444" },
+  ROAD_ACCIDENT:  { icon: "🚗", label: "Road Accident",  color: "#FF8C00" },
+  STROKE:         { icon: "🧠", label: "Stroke",         color: "#9C27B0" },
+  TRAUMA:         { icon: "🩹", label: "Trauma",         color: "#F44336" },
+};
 
 // ── Constants ──────────────────────────────────────────────────────────────
 const BLR_CENTER: [number, number] = [12.9716, 77.5946];
@@ -51,15 +60,21 @@ const SIG_COLOUR: Record<string, string> = {
   AMBER: "#FFB300",
 };
 
-// Traffic-light cycle (seconds): RED 25 s → GREEN 20 s → AMBER 5 s = 50 s total
-const CYCLE_RED   = 25;
-const CYCLE_GREEN = 20;
+// ── Realistic Bengaluru traffic-light cycle ─────────────────────────────────
+// Based on BBMP/BCTP standard urban junction timing:
+//   RED   50 s  — cross-traffic flows
+//   GREEN 35 s  — your direction flows
+//   AMBER  5 s  — clear the junction
+//   TOTAL 90 s  full cycle
+const CYCLE_RED   = 50;
+const CYCLE_GREEN = 35;
 const CYCLE_AMBER = 5;
-const CYCLE_TOTAL = CYCLE_RED + CYCLE_GREEN + CYCLE_AMBER; // 50
+const CYCLE_TOTAL = CYCLE_RED + CYCLE_GREEN + CYCLE_AMBER; // 90 s
 
 /**
- * Deterministic integer hash of a string so each signal starts at a
- * different phase in the 50-second cycle.
+ * Deterministic integer hash of a signal ID.
+ * Each junction starts at a different point in the 90-second cycle so
+ * nearby signals are naturally offset — just like real coordinated junctions.
  */
 function hashId(id: string): number {
   let h = 0x811c9dc5;
@@ -70,15 +85,31 @@ function hashId(id: string): number {
   return h;
 }
 
-/** Compute the visual signal status for one tick (ignores DB state). */
-function cycleStatus(sig: TrafficSignal, tick: number, isTriggered: boolean): string {
-  // Emergency green wave — lock to GREEN regardless of cycle
-  if (sig.emergency_override || isTriggered) return "GREEN";
+interface CycleInfo {
+  status: "RED" | "GREEN" | "AMBER";
+  secondsRemaining: number; // seconds until this phase ends
+  emergency: boolean;
+}
+
+/**
+ * Compute the current phase and seconds-remaining for a signal.
+ * Emergency-overridden signals stay GREEN until the ambulance passes —
+ * after which the normal 90-second cycle resumes exactly where it would
+ * naturally be (no reset, no stutter).
+ */
+function getCycleInfo(sig: TrafficSignal, tick: number, isTriggered: boolean): CycleInfo {
+  if (sig.emergency_override || isTriggered) {
+    return { status: "GREEN", secondsRemaining: 0, emergency: true };
+  }
   const phase = hashId(sig.id) % CYCLE_TOTAL;
   const t = (tick + phase) % CYCLE_TOTAL;
-  if (t < CYCLE_RED)               return "RED";
-  if (t < CYCLE_RED + CYCLE_GREEN) return "GREEN";
-  return "AMBER";
+  if (t < CYCLE_RED) {
+    return { status: "RED",   secondsRemaining: CYCLE_RED - t,                    emergency: false };
+  }
+  if (t < CYCLE_RED + CYCLE_GREEN) {
+    return { status: "GREEN", secondsRemaining: CYCLE_RED + CYCLE_GREEN - t,      emergency: false };
+  }
+  return   { status: "AMBER", secondsRemaining: CYCLE_TOTAL - t,                  emergency: false };
 }
 
 // ── Ambulance icons — colour-coded by mission ───────────────────────────────
@@ -129,62 +160,107 @@ function routeColour(vehicleId: string, mission?: MissionType): string {
 function SignalMarkers({
   signals,
   triggeredIds,
-  tick,
 }: {
   signals: TrafficSignal[];
   triggeredIds: Set<string>;
-  tick: number;
 }) {
+  // Own the tick here — keeps MapView parent stable while signals cycle every second
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+
   return (
     <>
       {signals.map((sig) => {
         const isTriggered  = triggeredIds.has(sig.id);
-        const statusNow    = cycleStatus(sig, tick, isTriggered);
-        const color        = SIG_COLOUR[statusNow] ?? SIG_COLOUR.RED;
-        const isGreenWave  = sig.emergency_override || isTriggered;
-        const isAmber      = statusNow === "AMBER";
+        const info         = getCycleInfo(sig, tick, isTriggered);
+        const color        = SIG_COLOUR[info.status];
+        const isAmber      = info.status === "AMBER";
+
         return (
           <CircleMarker
             key={sig.id}
             center={[sig.lat, sig.lng]}
-            radius={isGreenWave ? 10 : 7}
+            radius={info.emergency ? 11 : 7}
             pathOptions={{
               color,
               fillColor: color,
-              fillOpacity: 0.9,
-              weight: isGreenWave ? 3 : 1.5,
+              fillOpacity: info.emergency ? 1.0 : 0.88,
+              weight: info.emergency ? 3 : 1.5,
               opacity: 1,
-              className: isGreenWave
+              className: info.emergency
                 ? "signal-pulse"
                 : isAmber
                 ? "signal-amber"
                 : undefined,
             }}
           >
-            <Tooltip
-              direction="top"
-              offset={[0, -10]}
-              opacity={0.92}
-              permanent={false}
-            >
-              <span className="font-mono text-xs">
-                {sig.junction_name}
-                {isGreenWave ? (
-                  <span className="ml-1 text-green-400"> ⚡ GREEN WAVE</span>
+            <Tooltip direction="top" offset={[0, -12]} opacity={0.95}>
+              <div style={{ fontFamily: "monospace", fontSize: 11, lineHeight: 1.6 }}>
+                {/* Junction name */}
+                <div style={{ fontWeight: 700, marginBottom: 2 }}>
+                  {sig.junction_name}
+                </div>
+
+                {info.emergency ? (
+                  /* Emergency override state */
+                  <div>
+                    <span style={{ color: "#00E676", fontWeight: 600 }}>
+                      ⚡ EMERGENCY GREEN — ambulance approaching
+                    </span>
+                    {sig.eta_seconds != null && (
+                      <div style={{ color: "#aaa" }}>
+                        Ambulance ETA: <strong style={{ color: "#fff" }}>{sig.eta_seconds}s</strong>
+                      </div>
+                    )}
+                    <div style={{ color: "#aaa", fontSize: 10 }}>
+                      Normal cycle resumes after ambulance passes
+                    </div>
+                  </div>
                 ) : (
-                  <span
-                    className="ml-1"
-                    style={{ color }}
-                  >
-                    {" "}● {statusNow}
-                  </span>
+                  /* Normal cycle state */
+                  <div>
+                    <span style={{ color }}>
+                      ● {info.status}
+                    </span>
+                    {" — "}
+                    <span style={{ color: "#fff" }}>
+                      {info.secondsRemaining}s
+                    </span>
+                    {" "}
+                    <span style={{ color: "#888" }}>
+                      until{" "}
+                      {info.status === "RED"   ? "GREEN" :
+                       info.status === "GREEN" ? "AMBER" : "RED"}
+                    </span>
+                    <div style={{ marginTop: 3 }}>
+                      {/* Mini phase-bar */}
+                      <div style={{
+                        display: "flex", height: 4, borderRadius: 2,
+                        overflow: "hidden", width: 120, background: "#333",
+                      }}>
+                        <div style={{
+                          width: `${(CYCLE_RED / CYCLE_TOTAL) * 100}%`,
+                          background: "#FF2D2D", opacity: info.status === "RED" ? 1 : 0.3,
+                        }} />
+                        <div style={{
+                          width: `${(CYCLE_GREEN / CYCLE_TOTAL) * 100}%`,
+                          background: "#00E676", opacity: info.status === "GREEN" ? 1 : 0.3,
+                        }} />
+                        <div style={{
+                          width: `${(CYCLE_AMBER / CYCLE_TOTAL) * 100}%`,
+                          background: "#FFB300", opacity: info.status === "AMBER" ? 1 : 0.3,
+                        }} />
+                      </div>
+                      <div style={{ color: "#666", fontSize: 9, marginTop: 2 }}>
+                        90s cycle · RED 50s · GREEN 35s · AMBER 5s
+                      </div>
+                    </div>
+                  </div>
                 )}
-                {sig.eta_seconds != null && (
-                  <span className="ml-1 text-gray-300">
-                    {" "}· {sig.eta_seconds}s
-                  </span>
-                )}
-              </span>
+              </div>
             </Tooltip>
           </CircleMarker>
         );
@@ -292,7 +368,12 @@ function AmbulanceLayer({
               {!isSelected && (
                 <Tooltip direction="top" offset={[0, -20]} opacity={0.9}>
                   <span className="font-mono text-xs">
-                    {amb.vehicle_id} · click for route
+                    {amb.vehicle_id}
+                    {amb.incident_type && INCIDENT_META[amb.incident_type]
+                      ? ` · ${INCIDENT_META[amb.incident_type].icon} ${INCIDENT_META[amb.incident_type].label}`
+                      : ""
+                    }
+                    {" · click for route"}
                   </span>
                 </Tooltip>
               )}
@@ -336,6 +417,8 @@ function AmbulanceInfoCard({
     amb.mission === "TO_PATIENT"       ? "🟠 TO PATIENT" :
                                          "🔵 TO HOSPITAL";
 
+  const incident = amb.incident_type ? INCIDENT_META[amb.incident_type] : null;
+
   const etaMin = amb.eta_seconds != null ? Math.floor(amb.eta_seconds / 60) : null;
   const etaSec = amb.eta_seconds != null ? amb.eta_seconds % 60 : null;
   const distKm = amb.eta_seconds != null && amb.speed_kmh
@@ -356,6 +439,11 @@ function AmbulanceInfoCard({
           <div>
             <p className="text-xs font-mono font-bold text-foreground">{amb.vehicle_id}</p>
             <p className="text-[10px] font-mono" style={{ color }}>{missionLabel}</p>
+            {incident && (
+              <p className="text-[10px] font-mono font-semibold" style={{ color: incident.color }}>
+                {incident.icon} {incident.label}
+              </p>
+            )}
           </div>
         </div>
         <button
@@ -415,17 +503,150 @@ function AmbulanceInfoCard({
   );
 }
 
+// ── Hospital markers ────────────────────────────────────────────────────────
+const HOSPITAL_PALETTE: Record<string, { bg: string; border: string; label: string }> = {
+  government: { bg: "#1565C0", border: "#42A5F5", label: "Government"  },
+  private:    { bg: "#2E7D32", border: "#66BB6A", label: "Private"     },
+  specialty:  { bg: "#6A1B9A", border: "#AB47BC", label: "Specialty"   },
+};
+
+function makeHospitalIcon(type: string) {
+  const p = HOSPITAL_PALETTE[type] ?? HOSPITAL_PALETTE.private;
+  return L.divIcon({
+    className: "",
+    html: `<div style="
+      width:28px;height:28px;border-radius:6px;
+      background:${p.bg};display:flex;align-items:center;
+      justify-content:center;font-size:15px;
+      box-shadow:0 0 8px ${p.border}88;
+      border:2px solid ${p.border};
+    ">🏥</div>`,
+    iconSize: [28, 28],
+    iconAnchor: [14, 14],
+  });
+}
+
+const HOSP_ICON_GOV  = makeHospitalIcon("government");
+const HOSP_ICON_PVT  = makeHospitalIcon("private");
+const HOSP_ICON_SPEC = makeHospitalIcon("specialty");
+
+function hospitalIcon(type: string) {
+  if (type === "government") return HOSP_ICON_GOV;
+  if (type === "specialty")  return HOSP_ICON_SPEC;
+  return HOSP_ICON_PVT;
+}
+
+function HospitalLayer({ hospitals }: { hospitals: Hospital[] }) {
+  return (
+    <>
+      {hospitals.map((h) => {
+        const p = HOSPITAL_PALETTE[h.type] ?? HOSPITAL_PALETTE.private;
+        return (
+          <Marker
+            key={h.name}
+            position={[h.lat, h.lng]}
+            icon={hospitalIcon(h.type)}
+          >
+            <Tooltip direction="top" offset={[0, -16]} opacity={0.95}>
+              <div style={{ fontFamily: "monospace", fontSize: 11, lineHeight: 1.5 }}>
+                <strong>{h.name}</strong><br />
+                <span style={{ color: p.border }}>{p.label}</span>
+                {" · "}
+                <span style={{ color: "#aaa" }}>{h.beds} beds</span>
+              </div>
+            </Tooltip>
+          </Marker>
+        );
+      })}
+    </>
+  );
+}
+
+// ── Green wave alert banner (slides in from top when a wave fires) ──────────
+function GreenWaveAlert() {
+  const latestTrigger = useRescueStore((s) => s.latestTrigger);
+  const [visible, setVisible] = useState(false);
+  const prevTriggerRef = useRef(latestTrigger);
+
+  useEffect(() => {
+    if (latestTrigger && latestTrigger !== prevTriggerRef.current) {
+      prevTriggerRef.current = latestTrigger;
+      setVisible(true);
+      const t = setTimeout(() => setVisible(false), 6000);
+      return () => clearTimeout(t);
+    }
+  }, [latestTrigger]);
+
+  if (!latestTrigger) return null;
+
+  const amb = latestTrigger.ambulance;
+  const incident = amb.incident_type ? INCIDENT_META[amb.incident_type] : null;
+  const sigCount = latestTrigger.signals.length;
+  const color =
+    amb.vehicle_id === "BLR-AMB-DEMO" ? ROUTE_COLOUR.DEMO :
+    amb.mission === "TO_PATIENT"       ? ROUTE_COLOUR.TO_PATIENT :
+                                         ROUTE_COLOUR.TO_HOSPITAL;
+
+  return (
+    <AnimatePresence>
+      {visible && (
+        <motion.div
+          key={latestTrigger.ambulance.vehicle_id + Date.now()}
+          initial={{ y: -80, opacity: 0 }}
+          animate={{ y: 0, opacity: 1 }}
+          exit={{ y: -80, opacity: 0 }}
+          transition={{ type: "spring", damping: 20, stiffness: 200 }}
+          className="absolute top-4 left-1/2 -translate-x-1/2 z-[1001] flex items-center gap-3
+                     px-5 py-3 rounded-xl shadow-2xl border backdrop-blur-md"
+          style={{
+            background: `${color}18`,
+            borderColor: `${color}60`,
+            minWidth: 320,
+          }}
+        >
+          {/* Pulse dot */}
+          <span className="relative flex h-3 w-3 shrink-0">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75"
+                  style={{ background: color }} />
+            <span className="relative inline-flex rounded-full h-3 w-3"
+                  style={{ background: color }} />
+          </span>
+
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-bold font-mono" style={{ color }}>
+              🚦 GREEN WAVE ACTIVE
+            </p>
+            <p className="text-[11px] font-mono text-white/80 truncate">
+              {amb.vehicle_id}
+              {incident ? ` · ${incident.icon} ${incident.label}` : ""}
+              {" — "}
+              <span style={{ color }}>{sigCount} signal{sigCount !== 1 ? "s" : ""} cleared ahead</span>
+            </p>
+          </div>
+
+          <button
+            onClick={() => setVisible(false)}
+            className="text-white/40 hover:text-white/80 text-sm leading-none shrink-0"
+          >×</button>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+}
+
 // ── Main component ─────────────────────────────────────────────────────────
 export default function MapView() {
   const signals            = useRescueStore(useShallow(selectSignalList));
   const ambulances         = useRescueStore(useShallow(selectAmbulanceList));
   const triggeredSignalIds = useRescueStore((s) => s.triggeredSignalIds);
 
-  // Global 1-second tick that drives the signal colour cycle
-  const [tick, setTick] = useState(0);
+  // Fetch hospitals once on mount
+  const [hospitals, setHospitals] = useState<Hospital[]>([]);
   useEffect(() => {
-    const id = setInterval(() => setTick((t) => t + 1), 1000);
-    return () => clearInterval(id);
+    fetch("/api/hospitals")
+      .then((r) => r.json())
+      .then((data: Hospital[]) => setHospitals(data))
+      .catch(() => {/* silently ignore if backend not ready */});
   }, []);
 
   // Which ambulance is currently selected (shows route + info card)
@@ -436,7 +657,7 @@ export default function MapView() {
   const selectedAmb = ambulances.find((a) => a.vehicle_id === selectedId) ?? null;
 
   return (
-    <>
+    <div className="relative h-full w-full">
       <style>{`
         .signal-pulse {
           animation: signalPulse 1.2s ease-out infinite;
@@ -447,7 +668,7 @@ export default function MapView() {
           100% { stroke-width: 3; stroke-opacity: 1; }
         }
         .signal-amber {
-          animation: amberBlink 0.9s step-start infinite;
+          animation: amberBlink 0.7s step-start infinite;
         }
         @keyframes amberBlink {
           0%, 100% { opacity: 1; }
@@ -471,6 +692,71 @@ export default function MapView() {
         }
       `}</style>
 
+      {/* Map legend — bottom right */}
+      <div className="absolute bottom-4 right-4 z-[1000] rounded-xl border border-border/60
+                      bg-background/90 backdrop-blur-md px-3 py-2.5 shadow-xl text-[10px] font-mono
+                      space-y-1.5 min-w-[170px]">
+        <p className="text-[9px] uppercase tracking-widest text-muted-foreground mb-1">Legend</p>
+
+        {/* Signals — normal cycle */}
+        <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">
+          Traffic Signals · 90 s cycle
+        </p>
+        <div className="flex items-center gap-1.5">
+          <span className="w-3 h-3 rounded-full inline-block" style={{ background: "#FF2D2D" }} />
+          <span className="text-muted-foreground">RED &nbsp;— 50 s</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className="w-3 h-3 rounded-full inline-block" style={{ background: "#00E676" }} />
+          <span className="text-muted-foreground">GREEN — 35 s</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className="w-3 h-3 rounded-full inline-block" style={{ background: "#FFB300" }} />
+          <span className="text-muted-foreground">AMBER — 5 s</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className="w-3 h-3 rounded-full inline-block signal-pulse"
+                style={{ background: "#00E676", display: "inline-block" }} />
+          <span style={{ color: "#00E676" }}>⚡ EMERGENCY GREEN</span>
+        </div>
+
+        <div className="border-t border-border/40 my-1" />
+
+        {/* Ambulances */}
+        <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Ambulances</p>
+        <div className="flex items-center gap-1.5">
+          <span className="w-3 h-3 rounded inline-block" style={{ background: "#FF6D00" }} />
+          <span className="text-muted-foreground">→ Patient</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className="w-3 h-3 rounded inline-block" style={{ background: "#2979FF" }} />
+          <span className="text-muted-foreground">→ Hospital</span>
+        </div>
+
+        <div className="border-t border-border/40 my-1" />
+
+        {/* Hospitals */}
+        <p className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Hospitals</p>
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs">🏥</span>
+          <span className="w-2 h-2 rounded-sm inline-block" style={{ background: "#1565C0" }} />
+          <span className="text-muted-foreground">Government</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs">🏥</span>
+          <span className="w-2 h-2 rounded-sm inline-block" style={{ background: "#2E7D32" }} />
+          <span className="text-muted-foreground">Private</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs">🏥</span>
+          <span className="w-2 h-2 rounded-sm inline-block" style={{ background: "#6A1B9A" }} />
+          <span className="text-muted-foreground">Specialty / Med. College</span>
+        </div>
+      </div>
+
+      {/* Green wave alert banner */}
+      <GreenWaveAlert />
+
       {/* Floating info card — rendered outside MapContainer so it's above the map */}
       {selectedAmb && (
         <AmbulanceInfoCard amb={selectedAmb} onClose={handleDeselect} />
@@ -487,10 +773,11 @@ export default function MapView() {
 
         <DeselectOnMapClick onDeselect={handleDeselect} />
 
+        <HospitalLayer hospitals={hospitals} />
+
         <SignalMarkers
           signals={signals}
           triggeredIds={triggeredSignalIds}
-          tick={tick}
         />
         <AmbulanceLayer
           ambulances={ambulances}
@@ -499,6 +786,6 @@ export default function MapView() {
         />
         <AutoCamera ambulances={ambulances} />
       </MapContainer>
-    </>
+    </div>
   );
 }

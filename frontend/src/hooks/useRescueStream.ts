@@ -40,6 +40,7 @@ export function useRescueStream() {
   const {
     applyGreenWaveTrigger,
     upsertAmbulance,
+    removeAmbulance,
     upsertSignal,
     setStats,
     setWsConnected,
@@ -84,12 +85,17 @@ export function useRescueStream() {
           });
           break;
 
+        case "AMBULANCE_COMPLETED":
+          // Remove the ambulance from the map a few seconds after arrival
+          setTimeout(() => removeAmbulance(data.vehicle_id), 3_000);
+          break;
+
         default:
           // unknown type — ignore silently in production
           break;
       }
     },
-    [applyGreenWaveTrigger, upsertAmbulance, upsertSignal, setStats, pingWs]
+    [applyGreenWaveTrigger, upsertAmbulance, removeAmbulance, upsertSignal, setStats, pingWs]
   );
 
   // ── react-use-websocket ───────────────────────────────────────────────────

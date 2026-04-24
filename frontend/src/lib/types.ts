@@ -17,6 +17,8 @@ export interface TrafficSignal {
 
 export type MissionType = "TO_PATIENT" | "TO_HOSPITAL";
 
+export type IncidentType = "CARDIAC_ARREST" | "ROAD_ACCIDENT" | "STROKE" | "TRAUMA";
+
 export interface AmbulancePosition {
   vehicle_id: string;
   lat: number;
@@ -30,6 +32,7 @@ export interface AmbulancePosition {
   destination?: string;
   eta_seconds?: number;
   route_polyline?: [number, number][]; // [lng, lat] pairs — swap for Leaflet
+  incident_type?: IncidentType | string;
 }
 
 export interface GreenWaveTrigger {
@@ -67,4 +70,25 @@ export interface DashboardStats {
   signals_cleared_today: number;
 }
 
-export type WSMessage = GreenWaveTrigger | AmbulanceUpdate | SignalUpdate;
+export interface AmbulanceCompleted {
+  type: "AMBULANCE_COMPLETED";
+  vehicle_id: string;
+  minutes_saved: number;
+  destination_label: string;
+}
+
+export type WSMessage =
+  | GreenWaveTrigger
+  | AmbulanceUpdate
+  | SignalUpdate
+  | AmbulanceCompleted;
+
+export type HospitalType = "government" | "private" | "specialty";
+
+export interface Hospital {
+  name: string;
+  lat: number;
+  lng: number;
+  type: HospitalType;
+  beds: number;
+}

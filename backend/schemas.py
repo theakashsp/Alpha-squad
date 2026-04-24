@@ -56,6 +56,7 @@ class AmbulancePositionSchema(BaseModel):
     destination: Optional[str] = None       # human-readable end label
     eta_seconds: Optional[int] = None       # seconds to destination
     route_polyline: list[list[float]] = Field(default_factory=list)  # [[lng, lat], ...]
+    incident_type: Optional[str] = None     # "CARDIAC_ARREST" | "ROAD_ACCIDENT" | "STROKE" | "TRAUMA"
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +97,14 @@ class DashboardStats(BaseModel):
     signals_cleared_today: int = 0
 
 
+class AmbulanceCompleted(BaseModel):
+    """Broadcast when a dispatched ambulance reaches its destination."""
+    type: Literal["AMBULANCE_COMPLETED"] = "AMBULANCE_COMPLETED"
+    vehicle_id: str
+    minutes_saved: float
+    destination_label: str
+
+
 class ErrorMessage(BaseModel):
     type: Literal["ERROR"] = "ERROR"
     code: str
@@ -106,6 +115,7 @@ class ErrorMessage(BaseModel):
 WSMessage = Union[
     GreenWaveTrigger,
     AmbulanceUpdate,
+    AmbulanceCompleted,
     SignalUpdate,
     DashboardStats,
     ErrorMessage,
@@ -137,3 +147,26 @@ class ActiveRescueCreateRequest(BaseModel):
     destination_lat: float
     destination_lng: float
     destination_label: str
+
+
+class DispatchRequest(BaseModel):
+    origin_label: str
+    origin_lat: float
+    origin_lng: float
+    destination_label: str
+    destination_lat: float
+    destination_lng: float
+    incident_type: str = "CARDIAC_ARREST"
+    speed_kmh: float = 45.0
+    vehicle_id: Optional[str] = None   # auto-generated if omitted
+
+
+class DispatchResponse(BaseModel):
+    vehicle_id: str
+    rescue_id: str
+    origin_label: str
+    destination_label: str
+    incident_type: str
+    eta_seconds: int
+    route_points: int
+    status: str = "dispatched"
