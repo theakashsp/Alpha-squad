@@ -3,12 +3,17 @@ Central settings object – loaded once at startup.
 All other modules import `settings` from here.
 """
 from functools import lru_cache
+from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Resolve .env relative to this file so it is found regardless of
+# which directory uvicorn / the process is launched from.
+_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(_ENV_FILE),
         env_file_encoding="utf-8",
         case_sensitive=False,
     )
